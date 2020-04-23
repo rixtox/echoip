@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"strconv"
 )
 
@@ -44,6 +45,7 @@ type Response struct {
 	ASN        string               `json:"asn,omitempty"`
 	ASNOrg     string               `json:"asn_org,omitempty"`
 	UserAgent  *useragent.UserAgent `json:"user_agent,omitempty"`
+	RawRequest string               `json:"raw_request,omitempty"`
 }
 
 type PortResponse struct {
@@ -89,14 +91,10 @@ func ipFromRequest(headers []string, r *http.Request) (net.IP, error) {
 	return ip, nil
 }
 
-func (s *Server) newResponse(r *http.Request) (Response, error) {
-	ip, err := ipFromRequest(s.IPHeaders, r)
-	if err != nil {
-		return Response{}, err
-	}
-	response, ok := s.cache.Get(ip)
-	if ok {
-		return *response, nil
+func (s *Server) newResponse(r *http.Request) (response Response, err error) {
+	var ip net.IP
+	if ip, err = ipFromRequest(s.IPHeaders, r); err != nil {
+		return
 	}
 	ipDecimal := iputil.ToDecimal(ip)
 	country, _ := s.gr.Country(ip)
@@ -116,7 +114,11 @@ func (s *Server) newResponse(r *http.Request) (Response, error) {
 		parsed := useragent.Parse(userAgentRaw)
 		userAgent = &parsed
 	}
-	response = &Response{
+	var rawRequest []byte
+	if rawRequest, err = httputil.DumpRequest(r, false); err != nil {
+		return
+	}
+	response = Response{
 		IP:         ip,
 		IPDecimal:  ipDecimal,
 		Country:    country.Name,
@@ -129,9 +131,9 @@ func (s *Server) newResponse(r *http.Request) (Response, error) {
 		ASN:        autonomousSystemNumber,
 		ASNOrg:     asn.AutonomousSystemOrganization,
 		UserAgent:  userAgent,
+		RawRequest: string(rawRequest),
 	}
-	s.cache.Set(ip, response)
-	return *response, nil
+	return
 }
 
 func (s *Server) newPortResponse(r *http.Request) (PortResponse, error) {
@@ -217,6 +219,16 @@ func (s *Server) JSONHandler(w http.ResponseWriter, r *http.Request) *appError {
 	}
 	w.Header().Set("Content-Type", jsonMediaType)
 	w.Write(b)
+	return nil
+}
+
+func (s *Server) RawHandler(w http.ResponseWriter, r *http.Request) *appError {
+	response, err := s.newResponse(r)
+	if err != nil {
+		return internalServerError(err).AsJSON()
+	}
+	w.Header().Set("Content-Type", textMediaType)
+	w.Write([]byte(response.RawRequest))
 	return nil
 }
 
@@ -328,6 +340,9 @@ func (s *Server) Handler() http.Handler {
 	// JSON
 	r.Route("GET", "/", s.JSONHandler).Header("Accept", jsonMediaType)
 	r.Route("GET", "/json", s.JSONHandler)
+
+	// Raw
+	r.Route("GET", "/raw", s.RawHandler)
 
 	// CLI
 	r.Route("GET", "/", s.CLIHandler).MatcherFunc(cliMatcher)
